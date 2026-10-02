@@ -1,0 +1,12 @@
+name: readme-rot
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed for git drift analysis
+      - uses: ./           # in your own repo: uses: UE5test1/README-rot@v1
+        with:
+          fail-under: 80

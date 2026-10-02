@@ -11,6 +11,7 @@ Zero dependencies. Python 3.8+.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import unquote
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build",
@@ -61,6 +62,12 @@ RUN_FILE_RE = re.compile(
     r"ts-node|npx\s+tsx|npx\s+ts-node)\s+(?:-[\w\-]+\s+)*([\w./\-]+)(?:\s|$)"
 )
 DOT_SLASH_RE = re.compile(r"\./([\w./\-]+)")
+# Opt-out markers, e.g. around intentionally fake examples:
+#   <!-- readme-rot: off -->  ...  <!-- readme-rot: on -->   (a block)
+#   <!-- readme-rot: ignore -->                              (one line)
+OFF_RE = re.compile(r"<!--\s*readme-rot:\s*off\s*-->", re.I)
+ON_RE = re.compile(r"<!--\s*readme-rot:\s*on\s*-->", re.I)
+IGNORE_RE = re.compile(r"<!--\s*readme-rot:\s*ignore\s*-->", re.I)
 
 
 @dataclass
@@ -70,6 +77,7 @@ class Finding:
     kind: str
     message: str
     snippet: str = ""
+    suggestion: str = ""
 
 
 def slugify(heading: str) -> str:
@@ -132,6 +140,31 @@ class Repo:
         rel = rel.rstrip("/")
         return any((b / rel).exists() for b in (self.root, self.rdir))
 
+    def suggest_path(self, rel: str) -> str:
+        """Best guess at what a missing path was renamed or moved to."""
+        rel = re.sub(r"^(?:\.{1,2}/)+", "", rel.strip()).lstrip("/").rstrip("/")
+        if not rel:
+            return ""
+        name = rel.rsplit("/", 1)[-1]
+        pool = sorted(self.files | self.dirs)
+        # 1. Same name, different folder: the file was moved.
+        moved = [p for p in pool if p.rsplit("/", 1)[-1] == name and p != rel]
+        if moved:
+            return max(moved, key=lambda p: difflib.SequenceMatcher(None, rel, p).ratio())
+        # 2. Similar name (rename), preferring the same extension.
+        ext = Path(name).suffix
+        if ext:
+            pool = [p for p in pool if p.endswith(ext)]
+        pool = pool[:20000]
+        hit = difflib.get_close_matches(rel, pool, n=1, cutoff=0.6)
+        if hit:
+            return hit[0]
+        by_name = {}
+        for p in pool:
+            by_name.setdefault(p.rsplit("/", 1)[-1], p)
+        hit = difflib.get_close_matches(name, list(by_name), n=1, cutoff=0.75)
+        return by_name[hit[0]] if hit else ""
+
     def is_repo_dir(self, name: str) -> bool:
         return (self.root / name).is_dir()
 
@@ -154,6 +187,11 @@ class Repo:
                 toks.update(UPPER_TOKEN_RE.findall(data.decode("utf-8", "ignore")))
             self._corpus = toks
         return self._corpus
+
+
+def closest(word: str, options) -> str:
+    hit = difflib.get_close_matches(word, sorted(options), n=1, cutoff=0.6)
+    return hit[0] if hit else ""
 
 
 def parse_make_targets(path: Path) -> set:
@@ -186,7 +224,8 @@ def check_link(target, lineno, repo, own_slugs, out):
     base = repo.root if path.startswith("/") else repo.rdir
     full = base / path.lstrip("/")
     if not full.exists():
-        out.append(Finding("error", lineno, "broken-link", f"{path} does not exist", t))
+        out.append(Finding("error", lineno, "broken-link", f"{path} does not exist", t,
+                           repo.suggest_path(path)))
     elif frag and full.is_file() and full.suffix.lower() == ".md":
         try:
             if frag.lower() not in anchors_of(full.read_text(encoding="utf-8", errors="ignore")):
@@ -218,10 +257,12 @@ def check_pathlike(code, lineno, repo, out):
         if code in repo.base or segs[0] in FRAMEWORK_STEMS:
             return
         out.append(Finding("warn", lineno, "missing-file",
-                           f"{code} not found anywhere in the repo (generated file?)", code))
+                           f"{code} not found anywhere in the repo (generated file?)", code,
+                           repo.suggest_path(code)))
         return
     if has_ext or trailing or dotted or repo.is_repo_dir(first):
-        out.append(Finding("error", lineno, "missing-file", f"{code} does not exist", code))
+        out.append(Finding("error", lineno, "missing-file", f"{code} does not exist", code,
+                           repo.suggest_path(code)))
 
 
 def check_command(part, lineno, repo, out):
@@ -234,7 +275,8 @@ def check_command(part, lineno, repo, out):
                                f"README runs `{part}` but there is no package.json", part))
         elif s not in repo.scripts:
             out.append(Finding("error", lineno, "missing-script",
-                               f'no "{s}" script in package.json', part))
+                               f'no "{s}" script in package.json', part,
+                               closest(s, repo.scripts)))
         return
     if NPM_TEST_RE.match(part):
         if repo.has_pkg and "test" not in repo.scripts:
@@ -249,7 +291,8 @@ def check_command(part, lineno, repo, out):
                                f"README runs `{part}` but there is no Makefile", part))
         elif t not in repo.make_targets:
             out.append(Finding("error", lineno, "missing-make-target",
-                               f"no `{t}` target in Makefile", part))
+                               f"no `{t}` target in Makefile", part,
+                               closest(t, repo.make_targets)))
         return
     m = RUN_FILE_RE.match(part)
     if m and not re.search(r"\s-m\s", part):
@@ -258,13 +301,15 @@ def check_command(part, lineno, repo, out):
             if not repo.exists(tok) and tok.rsplit("/", 1)[-1] not in repo.base:
                 if tok.split("/")[0].rsplit(".", 1)[0].lower() not in PLACEHOLDERS:
                     out.append(Finding("error", lineno, "missing-file",
-                                       f"{tok} does not exist", part))
+                                       f"{tok} does not exist", part,
+                                       repo.suggest_path(tok)))
         return
     m = DOT_SLASH_RE.match(part)
     if m and re.search(rf"\.({EXT})$", m.group(1), re.I):
         if not repo.exists(m.group(1)):
             out.append(Finding("error", lineno, "missing-file",
-                               f"./{m.group(1)} does not exist", part))
+                               f"./{m.group(1)} does not exist", part,
+                               repo.suggest_path(m.group(1))))
 
 
 def run_git(root, *args):
@@ -299,10 +344,18 @@ def audit(root: Path, readme: Path, use_git=True):
     repo = Repo(root, readme)
     text = readme.read_text(encoding="utf-8", errors="ignore")
     own_slugs = anchors_of(text)
-    out, seen_env, in_fence = [], set(), False
+    out, seen_env, in_fence, off = [], set(), False, False
     for i, raw in enumerate(text.splitlines(), 1):
         if FENCE_RE.match(raw):
             in_fence = not in_fence
+            continue
+        # Markers count only as real HTML comments, not inside code spans or fences.
+        bare = "" if in_fence else INLINE_RE.sub("", raw)
+        if OFF_RE.search(bare):
+            off = True
+        if off or IGNORE_RE.search(bare):
+            if ON_RE.search(bare):
+                off = False
             continue
         if in_fence:
             line = re.sub(r"^\s*[$>%]\s+", "", raw).strip()
@@ -360,6 +413,26 @@ def verdict(score):
     return "Compost"
 
 
+def describe(f: Finding) -> str:
+    """Finding message, with a "did you mean" hint when we have one."""
+    return f"{f.message} (did you mean {f.suggestion}?)" if f.suggestion else f.message
+
+
+def _gh_escape(s: str, prop: bool = False) -> str:
+    s = s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return s.replace(":", "%3A").replace(",", "%2C") if prop else s
+
+
+def github_annotation(f: Finding, file: str) -> str:
+    """One GitHub Actions workflow command, shown inline on the PR diff."""
+    cmd = {"error": "error", "warn": "warning", "info": "notice"}[f.level]
+    props = f"file={_gh_escape(file, True)}"
+    if f.line:
+        props += f",line={f.line}"
+    props += f",title={_gh_escape('readme-rot: ' + f.kind, True)}"
+    return f"::{cmd} {props}::{_gh_escape(describe(f))}"
+
+
 def badge_url(score):
     color = ("brightgreen" if score >= 90 else "green" if score >= 75 else
              "yellow" if score >= 60 else "orange" if score >= 30 else "red")
@@ -369,7 +442,9 @@ def badge_url(score):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="readme-rot", description=__doc__.split("\n\n")[0])
     ap.add_argument("path", nargs="?", default=".", help="repo directory or README file")
-    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--format", choices=["text", "json", "github"], default="text",
+                    help="text (default), json, or github (Actions annotations on the PR)")
+    ap.add_argument("--json", action="store_true", help="shortcut for --format json")
     ap.add_argument("--badge", action="store_true", help="print a shields.io badge for your README")
     ap.add_argument("--fail-under", type=int, metavar="N",
                     help="exit 1 if score < N (default: exit 1 on any error)")
@@ -390,7 +465,16 @@ def main(argv=None):
     findings = audit(root, readme, use_git=not a.no_git)
     score = score_of(findings)
 
-    if a.json:
+    fmt = "json" if a.json else a.format
+    if fmt == "github":
+        try:
+            shown = readme.relative_to(Path.cwd()).as_posix()
+        except ValueError:
+            shown = readme.name
+        for f in findings:
+            print(github_annotation(f, shown))
+        print(f"readme-rot: freshness {score}/100 ({verdict(score)})")
+    elif fmt == "json":
         print(json.dumps({"readme": readme.name, "score": score, "verdict": verdict(score),
                           "findings": [asdict(f) for f in findings]}, indent=2))
     else:
@@ -401,7 +485,7 @@ def main(argv=None):
         order = {"error": 0, "warn": 1, "info": 2}
         for f in sorted(findings, key=lambda f: (order[f.level], f.line)):
             loc = f"line {f.line:<4}" if f.line else "         "
-            print(f"  {icon[f.level]} {loc} {f.kind:<20} {f.message}")
+            print(f"  {icon[f.level]} {loc} {f.kind:<20} {describe(f)}")
         if not findings:
             print("  Nothing rotten. Your README is telling the truth.")
         print(f"\nFreshness: {paint('1', f'{score}/100')} ({verdict(score)})")

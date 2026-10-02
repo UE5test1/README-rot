@@ -1,0 +1,29 @@
+name: README rot check
+description: Find the lies in your README - dead links, missing files, renamed scripts, ghost env vars.
+author: UE5test1
+branding:
+  icon: file-text
+  color: orange
+inputs:
+  path:
+    description: Repo directory or README file to check.
+    required: false
+    default: "."
+  fail-under:
+    description: Fail the job if the freshness score is below this number. Leave empty to fail on any error.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.x"
+    - shell: bash
+      env:
+        RR_PATH: ${{ inputs.path }}
+        RR_FAIL_UNDER: ${{ inputs.fail-under }}
+      run: |
+        args=()
+        if [ -n "$RR_FAIL_UNDER" ]; then args+=(--fail-under "$RR_FAIL_UNDER"); fi
+        python "$GITHUB_ACTION_PATH/readme_rot.py" "$RR_PATH" --format github "${args[@]}"

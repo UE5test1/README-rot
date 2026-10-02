@@ -8,6 +8,8 @@ Zero dependencies. One file. Python 3.8+.
 
 ## What it catches
 
+<!-- readme-rot: off -->
+
 |Check|Example|
 |-|-|
 |Broken links and anchors|`[guide](docs/guide.md#setup)` where that heading no longer exists|
@@ -17,6 +19,10 @@ Zero dependencies. One file. Python 3.8+.
 |Missing scripts in commands|`python scripts/migrate.py` points at nothing|
 |Ghost env vars|`DATABASE_URL_PRIMARY` is documented but no code reads it|
 |Drift|README untouched for 300 days while 400 commits landed|
+
+<!-- readme-rot: on -->
+
+Every broken path comes with a **did you mean** hint when a moved or renamed file looks like a match.
 
 It is built to avoid false positives: `Node.js`, `read/write`, `path/to/file.txt`, `/usr/bin/env`, and lines containing `cd` are all ignored.
 
@@ -48,6 +54,7 @@ pipx install .
 readme-rot              # audit the current repo
 readme-rot --badge      # also print a shields.io badge
 readme-rot --json       # for tooling
+readme-rot --format github   # inline annotations in GitHub Actions
 readme-rot --fail-under 80   # CI gate
 ```
 
@@ -72,7 +79,34 @@ Freshness: 12/100 (Compost)
 
 ## Use it in CI
 
-Copy `.github/workflows/readme-rot.yml` into your repo. Use `fetch-depth: 0` so git drift analysis works.
+Add this to `.github/workflows/readme-rot.yml`. Problems show up as inline annotations on the README in your pull requests.
+
+```yaml
+name: readme-rot
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed for git drift analysis
+      - uses: UE5test1/README-rot@v1
+        with:
+          fail-under: 80   # optional; default fails on any error
+```
+
+## Intentional fake examples
+
+Docs about docs need examples that point at nothing. Tell `readme-rot` to look away:
+
+```markdown
+<!-- readme-rot: off -->
+Anything here is skipped, e.g. `npm run start` in a tutorial.
+<!-- readme-rot: on -->
+
+One line: `src/example.py` <!-- readme-rot: ignore -->
+```
 
 ## Scoring
 
@@ -98,7 +132,7 @@ python -m unittest discover -s tests
 
 * Check documented CLI flags against `argparse`/`click` definitions
 * Verify `pip install` / `npm install` package names exist in manifests
-* `--fix` mode that suggests the closest existing filename for a broken path
+* `--fix` mode that applies the "did you mean" suggestions for you
 * Support for `.rst` and docs folders
 
 PRs welcome.
