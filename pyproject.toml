@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "readme-rot"
+version = "0.1.0"
+description = "Find the lies in your README: dead links, missing files, renamed scripts, ghost env vars."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["readme", "documentation", "linter", "docs", "ci"]
+
+[project.scripts]
+readme-rot = "readme_rot:main"
+
+[tool.setuptools]
+py-modules = ["readme_rot"]
