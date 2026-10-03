@@ -4,7 +4,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0   # needed for git drift analysis
       - uses: ./           # in your own repo: uses: UE5test1/README-rot@v1
